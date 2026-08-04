@@ -1,4 +1,4 @@
-name: Temporary Blender runtime fetch
+name: Temporary Blender 5.1 runtime fetch
 
 on:
   pull_request:
@@ -13,26 +13,24 @@ jobs:
         run: |
           set -euo pipefail
           curl --fail --location --retry 8 \
-            'https://files.pythonhosted.org/packages/53/74/827c0930eec8d1b74b8c67d4066bf922f1e15a3d80f0f50ed4a48a2692b1/bpy-5.2.0-cp313-cp313-manylinux_2_28_x86_64.whl' \
+            'https://files.pythonhosted.org/packages/40/a7/67c0be9783399f262e7195359553490c05aba38485590a225b23031fe406/bpy-5.1.2-cp313-cp313-manylinux_2_28_x86_64.whl' \
             --output bpy.whl
-          test "$(sha256sum bpy.whl | cut -d' ' -f1)" = 'daae68954f1ab33996aa582861323eff815210e5c56641ac62f855a8365201c2'
+          test "$(sha256sum bpy.whl | cut -d' ' -f1)" = '2179229588cbb7c4a6c2b51dcf0526cbb800f8bd15f0d74558834d7df9f5a528'
           split --bytes=50000000 --numeric-suffixes=0 --suffix-length=2 bpy.whl bpy.part.
           sha256sum bpy.part.*
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-00, path: bpy.part.00, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-00, path: bpy.part.00, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-01, path: bpy.part.01, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-01, path: bpy.part.01, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-02, path: bpy.part.02, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-02, path: bpy.part.02, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-03, path: bpy.part.03, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-03, path: bpy.part.03, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-04, path: bpy.part.04, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-04, path: bpy.part.04, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-05, path: bpy.part.05, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-05, path: bpy.part.05, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-06, path: bpy.part.06, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-06, path: bpy.part.06, compression-level: 0, retention-days: 1}
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-07, path: bpy.part.07, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-08, path: bpy.part.08, compression-level: 0, retention-days: 1}
+        with: {name: bpy51-part-07, path: bpy.part.07, compression-level: 0, retention-days: 1}
