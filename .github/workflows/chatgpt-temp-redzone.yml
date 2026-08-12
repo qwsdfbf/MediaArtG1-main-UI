@@ -9,37 +9,112 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tools
         run: |
-          python -m pip install -U yt-dlp
+          python -m pip install -U yt-dlp beautifulsoup4 requests
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg unzip
-      - name: Fetch source material
+          sudo apt-get install -y -qq ffmpeg unzip jq nodejs
+      - name: Fetch tutorial page and embedded video
         shell: bash
         run: |
           mkdir -p out
           set +e
-          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav -o 'out/yokatta_source.%(ext)s' 'https://www.youtube.com/shorts/deJSvXqiZkw'
-          echo "youtube_exit=$?" | tee out/fetch_status.txt
-          if [ ! -s out/yokatta_source.wav ]; then
-            yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav -o 'out/yokatta_source.%(ext)s' 'https://www.bilibili.com/video/BV1vk4y1p7e4/'
-            echo "bilibili_exit=$?" | tee -a out/fetch_status.txt
-          fi
-      - name: Fetch exact RED ZONE tutorial pack
+          curl -fsSL 'https://yaminatsun.theblog.me/posts/1949932/' -o out/tutorial.html
+          python - <<'PY'
+          import re, pathlib
+          s=pathlib.Path('out/tutorial.html').read_text(errors='ignore')
+          pats=[r'youtube(?:-nocookie)?\.com/(?:embed/|watch\?v=)([A-Za-z0-9_-]{11})',r'youtu\.be/([A-Za-z0-9_-]{11})',r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"']
+          ids=[]
+          for p in pats: ids += re.findall(p,s,re.I)
+          pathlib.Path('out/tutorial_youtube_ids.txt').write_text('\n'.join(dict.fromkeys(ids)))
+          PY
+          while read id; do
+            [ -z "$id" ] && continue
+            yt-dlp --no-playlist --remote-components ejs:github --js-runtimes node -o 'out/tutorial_video.%(ext)s' "https://www.youtube.com/watch?v=$id" && break
+          done < out/tutorial_youtube_ids.txt
+      - name: Fetch raw source through many routes
         shell: bash
         run: |
           set +e
-          curl -fL --retry 3 --retry-delay 2 'https://www.dropbox.com/s/nffkdzhnbsagmzb/RED%20ZONE%20%E9%85%8D%E5%B8%83.zip?dl=1' -o out/redzone_tutorial.zip
-          echo "dropbox_exit=$?" | tee -a out/fetch_status.txt
-          file out/redzone_tutorial.zip | tee -a out/fetch_status.txt
-          unzip -l out/redzone_tutorial.zip > out/redzone_zip_list.txt 2>&1
-          if unzip -t out/redzone_tutorial.zip >/dev/null 2>&1; then
-            mkdir -p out/redzone_tutorial
-            unzip -o out/redzone_tutorial.zip -d out/redzone_tutorial
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36'
+          # YouTube short: several clients + JS component
+          for client in web_safari tv android_vr mweb web; do
+            yt-dlp --no-playlist --remote-components ejs:github --js-runtimes node --extractor-args "youtube:player_client=$client" -f 'bestaudio/best' -x --audio-format wav -o 'out/yokatta_source.%(ext)s' 'https://www.youtube.com/shorts/deJSvXqiZkw' && break
+          done
+          # Mir6 parser for the full original episode mirror
+          curl -fsSLG 'https://api.mir6.com/api/bzjiexi' --data-urlencode 'url=https://www.bilibili.com/video/BV1vk4y1p7e4/' --data-urlencode 'type=json' -A "$UA" -o out/mir6.json
+          python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('out/mir6.json')
+          try:
+            d=json.loads(p.read_text())
+            urls=[]
+            def walk(x):
+              if isinstance(x,dict):
+                for k,v in x.items():
+                  if isinstance(v,str) and v.startswith('http') and ('url' in k.lower() or 'video' in k.lower()): urls.append(v)
+                  walk(v)
+              elif isinstance(x,list):
+                for v in x: walk(v)
+            walk(d)
+            pathlib.Path('out/mir6_urls.txt').write_text('\n'.join(dict.fromkeys(urls)))
+          except Exception as e: pathlib.Path('out/mir6_parse_error.txt').write_text(repr(e))
+          PY
+          if [ ! -s out/yokatta_source.wav ]; then
+            while read u; do
+              [ -z "$u" ] && continue
+              curl -fL --retry 2 -A "$UA" -e 'https://www.bilibili.com/' "$u" -o out/bili_candidate.bin && break
+            done < out/mir6_urls.txt
           fi
-          find out -maxdepth 4 -type f -printf '%p\t%s bytes\n' | sort > out/files.txt
+          # Direct Bilibili public APIs
+          curl -fsSL -A "$UA" -e 'https://www.bilibili.com/' 'https://api.bilibili.com/x/web-interface/view?bvid=BV1vk4y1p7e4' -o out/bili_view.json
+          CID=$(jq -r '.data.cid // empty' out/bili_view.json)
+          if [ -n "$CID" ]; then
+            curl -fsSL -A "$UA" -e 'https://www.bilibili.com/' "https://api.bilibili.com/x/player/playurl?bvid=BV1vk4y1p7e4&cid=$CID&qn=64&fnval=0" -o out/bili_play.json
+            U=$(jq -r '.data.durl[0].url // empty' out/bili_play.json)
+            [ -n "$U" ] && curl -fL --retry 2 -A "$UA" -e 'https://www.bilibili.com/' "$U" -o out/bili_episode.flv
+          fi
+          file out/* > out/source_files.txt 2>&1
+      - name: Fetch available RED ZONE Reaper/MIDI files
+        shell: bash
+        run: |
+          set +e
+          curl -fsSL 'https://ux.getuploader.com/papikonohaifubutu/index/filesize/desc/3' -o out/uploader.html
+          python - <<'PY'
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin
+          import pathlib,re
+          s=pathlib.Path('out/uploader.html').read_text(errors='ignore'); soup=BeautifulSoup(s,'html.parser')
+          wanted=['ぞね.rpp','RED ZONE(配布用).mid','RED ZONE　Full.mid','reaper.rpp']
+          lines=[]
+          for a in soup.find_all('a',href=True):
+            t=a.get_text(' ',strip=True)
+            if any(w in t for w in wanted): lines.append(t+'\t'+urljoin('https://ux.getuploader.com',a['href']))
+          pathlib.Path('out/uploader_links.txt').write_text('\n'.join(lines))
+          PY
+          cat out/uploader_links.txt
+          while IFS=$'\t' read name url; do
+            [ -z "$url" ] && continue
+            safe=$(echo "$name" | tr '/ ' '__')
+            curl -fsSL -A 'Mozilla/5.0' "$url" -o "out/page_$safe.html"
+            python - "$url" "out/page_$safe.html" "out/$name" <<'PY'
+          import sys, pathlib
+          from bs4 import BeautifulSoup
+          from urllib.parse import urljoin
+          base,fp,out=sys.argv[1:]
+          soup=BeautifulSoup(pathlib.Path(fp).read_text(errors='ignore'),'html.parser')
+          c=[]
+          for a in soup.find_all('a',href=True):
+            h=a['href']; t=a.get_text(' ',strip=True).lower()
+            if 'download' in h.lower() or 'ダウンロード' in t or '/download/' in h: c.append(urljoin(base,h))
+          pathlib.Path(out+'.urls').write_text('\n'.join(dict.fromkeys(c)))
+          PY
+            while read u; do [ -n "$u" ] && curl -fL -A 'Mozilla/5.0' "$u" -o "out/$name" && break; done < "out/$name.urls"
+          done < out/uploader_links.txt
+      - name: Inventory
+        run: find out -maxdepth 2 -type f -printf '%p\t%s bytes\n' | sort > out/files.txt
       - name: Upload fetched materials
         uses: actions/upload-artifact@v4
         with:
-          name: redzone-fetch
+          name: redzone-fetch2
           path: out
           if-no-files-found: error
           retention-days: 1
