@@ -1,0 +1,45 @@
+name: chatgpt-temp-redzone
+on:
+  push:
+    branches: [chatgpt-temp-redzone]
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          python -m pip install -U yt-dlp
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg unzip
+      - name: Fetch source material
+        shell: bash
+        run: |
+          mkdir -p out
+          set +e
+          yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav -o 'out/yokatta_source.%(ext)s' 'https://www.youtube.com/shorts/deJSvXqiZkw'
+          echo "youtube_exit=$?" | tee out/fetch_status.txt
+          if [ ! -s out/yokatta_source.wav ]; then
+            yt-dlp --no-playlist -f 'bestaudio/best' -x --audio-format wav -o 'out/yokatta_source.%(ext)s' 'https://www.bilibili.com/video/BV1vk4y1p7e4/'
+            echo "bilibili_exit=$?" | tee -a out/fetch_status.txt
+          fi
+      - name: Fetch exact RED ZONE tutorial pack
+        shell: bash
+        run: |
+          set +e
+          curl -fL --retry 3 --retry-delay 2 'https://www.dropbox.com/s/nffkdzhnbsagmzb/RED%20ZONE%20%E9%85%8D%E5%B8%83.zip?dl=1' -o out/redzone_tutorial.zip
+          echo "dropbox_exit=$?" | tee -a out/fetch_status.txt
+          file out/redzone_tutorial.zip | tee -a out/fetch_status.txt
+          unzip -l out/redzone_tutorial.zip > out/redzone_zip_list.txt 2>&1
+          if unzip -t out/redzone_tutorial.zip >/dev/null 2>&1; then
+            mkdir -p out/redzone_tutorial
+            unzip -o out/redzone_tutorial.zip -d out/redzone_tutorial
+          fi
+          find out -maxdepth 4 -type f -printf '%p\t%s bytes\n' | sort > out/files.txt
+      - name: Upload fetched materials
+        uses: actions/upload-artifact@v4
+        with:
+          name: redzone-fetch
+          path: out
+          if-no-files-found: error
+          retention-days: 1
