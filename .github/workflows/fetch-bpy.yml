@@ -1,40 +1,173 @@
-name: Temporary Blender Python package fetch
+name: Temporary visual-reference candidate fetch
 
 on:
   push:
     branches: [main]
-  pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  fetch:
+  collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Download and split Blender Python module
+      - name: Collect candidate reference images
         run: |
-          curl --fail --location --retry 5 \
-            'https://files.pythonhosted.org/packages/53/74/827c0930eec8d1b74b8c67d4066bf922f1e15a3d80f0f50ed4a48a2692b1/bpy-5.2.0-cp313-cp313-manylinux_2_28_x86_64.whl' \
-            --output bpy.whl
-          test "$(sha256sum bpy.whl | cut -d' ' -f1)" = 'daae68954f1ab33996aa582861323eff815210e5c56641ac62f855a8365201c2'
-          split --bytes=50000000 --numeric-suffixes=0 --suffix-length=2 bpy.whl bpy.part.
-          sha256sum bpy.part.*
+          python - <<'PY'
+          import csv, io, json, os, re, time
+          from pathlib import Path
+          from urllib.parse import urlencode
+          import requests
+          from PIL import Image, ImageStat
+
+          BASE = "https://safebooru.donmai.us"
+          OUT = Path("candidates")
+          OUT.mkdir(exist_ok=True)
+          session = requests.Session()
+          session.headers.update({"User-Agent": "VisualReferenceResearch/1.0 (noncommercial reference collection)"})
+
+          pairs = [
+              ("sitting", "bound"), ("kneeling", "bound"),
+              ("sitting", "chains"), ("kneeling", "chains"),
+              ("sitting", "shackles"), ("kneeling", "shackles"),
+              ("sitting", "handcuffs"), ("kneeling", "handcuffs"),
+              ("sitting", "rope"), ("kneeling", "rope"),
+              ("sitting", "cage"), ("kneeling", "cage"),
+              ("sitting", "prison"), ("kneeling", "prison"),
+              ("sitting", "dungeon"), ("kneeling", "dungeon"),
+              ("sitting", "tentacles"), ("kneeling", "tentacles"),
+              ("sitting", "torn_clothes"), ("kneeling", "torn_clothes"),
+              ("sitting", "injury"), ("kneeling", "injury"),
+              ("sitting", "blood"), ("kneeling", "blood"),
+              ("sitting", "crying"), ("kneeling", "crying"),
+              ("sitting", "tears"), ("kneeling", "tears"),
+              ("sitting", "dirty"), ("kneeling", "dirty"),
+              ("sitting", "bandages"), ("kneeling", "bandages"),
+              ("sitting", "ruins"), ("kneeling", "ruins"),
+              ("sitting", "rubble"), ("kneeling", "rubble"),
+              ("sitting", "debris"), ("kneeling", "debris"),
+              ("sitting", "dark"), ("kneeling", "dark"),
+              ("sitting", "sad"), ("kneeling", "sad"),
+              ("sitting", "scared"), ("kneeling", "scared"),
+              ("sitting", "closed_eyes"), ("kneeling", "closed_eyes"),
+              ("sitting", "hugging_own_legs"), ("kneeling", "head_down"),
+              ("sitting_on_ground", "1girl"), ("seiza", "1girl")
+          ]
+
+          reject_tags = {
+              "ai-generated", "ai-assisted", "novelai", "stable_diffusion",
+              "nude", "naked", "nipples", "areolae", "sex", "cum", "masturbation",
+              "panties", "underwear_only", "bikini", "lingerie", "spread_legs",
+              "pov_crotch", "ass_focus", "breast_focus", "bondage_outfit"
+          }
+          seat_reject = {
+              "sitting_on_chair", "sitting_on_bed", "sitting_on_bench", "sitting_on_sofa",
+              "sitting_on_stool", "sitting_on_throne", "sitting_on_lap", "sitting_on_person",
+              "sitting_on_desk", "sitting_on_table", "sitting_on_vehicle", "sitting_on_rock"
+          }
+          distress = {
+              "bound", "chains", "shackles", "handcuffs", "rope", "cage", "prison", "dungeon",
+              "tentacles", "torn_clothes", "torn_dress", "injury", "blood", "crying", "tears",
+              "dirty", "bandages", "bruises", "sad", "scared", "closed_eyes", "head_down",
+              "hugging_own_legs", "rubble", "ruins", "debris", "restrained", "collar", "gag",
+              "cowering", "pain", "wince", "defeated", "exhausted", "slouching"
+          }
+          darkish = {
+              "dark", "night", "dark_background", "black_background", "indoors", "dungeon",
+              "prison", "ruins", "rubble", "debris", "greyscale", "monochrome", "low-key_lighting"
+          }
+          frontish = {"looking_at_viewer", "straight-on", "front_view", "facing_viewer"}
+
+          posts = {}
+          for idx, (pose, cue) in enumerate(pairs, 1):
+              tags = f"{pose} {cue} date:<2023-01-01 order:score"
+              try:
+                  r = session.get(f"{BASE}/posts.json", params={"tags": tags, "limit": 200}, timeout=40)
+                  print(idx, tags, r.status_code, flush=True)
+                  if r.status_code != 200:
+                      time.sleep(1.5)
+                      continue
+                  data = r.json()
+              except Exception as e:
+                  print("query error", tags, repr(e), flush=True)
+                  time.sleep(2)
+                  continue
+              for p in data:
+                  alltags = set(str(p.get("tag_string", "")).split())
+                  if "1girl" not in alltags or "solo" not in alltags:
+                      continue
+                  if alltags & reject_tags or alltags & seat_reject:
+                      continue
+                  if not ({"sitting", "kneeling", "sitting_on_ground", "seiza"} & alltags):
+                      continue
+                  if not (alltags & distress):
+                      continue
+                  if p.get("rating") not in ("g", None, ""):
+                      continue
+                  created = str(p.get("created_at", ""))
+                  if created and created[:10] >= "2023-01-01":
+                      continue
+                  url = p.get("large_file_url") or p.get("file_url") or p.get("preview_file_url")
+                  if not url:
+                      continue
+                  score = int(p.get("score") or 0)
+                  score += 18 * len(alltags & distress)
+                  score += 10 * len(alltags & darkish)
+                  score += 14 * len(alltags & frontish)
+                  if "full_body" in alltags: score += 8
+                  if "solo" in alltags: score += 3
+                  old = posts.get(p["id"])
+                  if old is None or score > old[0]:
+                      posts[p["id"]] = (score, p, pose, cue)
+              time.sleep(0.8)
+
+          ranked = sorted(posts.values(), key=lambda x: x[0], reverse=True)
+          print("unique metadata candidates", len(ranked), flush=True)
+          rows = []
+          saved = 0
+          for score, p, pose, cue in ranked:
+              if saved >= 900:
+                  break
+              url = p.get("large_file_url") or p.get("file_url") or p.get("preview_file_url")
+              try:
+                  rr = session.get(url, timeout=45, headers={"Referer": BASE + "/"})
+                  if rr.status_code != 200 or len(rr.content) < 5000:
+                      continue
+                  im = Image.open(io.BytesIO(rr.content)).convert("RGB")
+                  if im.width < 300 or im.height < 300:
+                      continue
+                  im.thumbnail((1100, 1100), Image.Resampling.LANCZOS)
+                  # Keep a broad pool, but discard only extremely bright/blank images.
+                  lum = ImageStat.Stat(im.resize((64,64)).convert("L")).mean[0]
+                  if lum > 224:
+                      continue
+                  saved += 1
+                  fn = f"{saved:04d}_id{p['id']}.jpg"
+                  im.save(OUT / fn, "JPEG", quality=90, optimize=True)
+                  rows.append({
+                      "file": fn, "id": p["id"], "score": score, "luminance": round(lum,1),
+                      "created_at": p.get("created_at", ""), "rating": p.get("rating", ""),
+                      "page": f"{BASE}/posts/{p['id']}", "source": p.get("source", ""),
+                      "artist": p.get("tag_string_artist", ""), "query_pose": pose, "query_cue": cue,
+                      "tags": p.get("tag_string", "")
+                  })
+                  if saved % 25 == 0:
+                      print("saved", saved, flush=True)
+              except Exception as e:
+                  print("download error", p.get("id"), type(e).__name__, flush=True)
+
+          with open(OUT / "metadata.csv", "w", encoding="utf-8-sig", newline="") as f:
+              fields = ["file","id","score","luminance","created_at","rating","page","source","artist","query_pose","query_cue","tags"]
+              w = csv.DictWriter(f, fieldnames=fields)
+              w.writeheader(); w.writerows(rows)
+          with open(OUT / "summary.json", "w", encoding="utf-8") as f:
+              json.dump({"saved": saved, "metadata_candidates": len(ranked)}, f, ensure_ascii=False, indent=2)
+          print("FINAL SAVED", saved, flush=True)
+          PY
       - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-00, path: bpy.part.00, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-01, path: bpy.part.01, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-02, path: bpy.part.02, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-03, path: bpy.part.03, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-04, path: bpy.part.04, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-05, path: bpy.part.05, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-06, path: bpy.part.06, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-07, path: bpy.part.07, compression-level: 0, retention-days: 1}
-      - uses: actions/upload-artifact@v4
-        with: {name: bpy-part-08, path: bpy.part.08, compression-level: 0, retention-days: 1}
+        with:
+          name: visual-reference-candidates
+          path: candidates
+          compression-level: 6
+          retention-days: 1
