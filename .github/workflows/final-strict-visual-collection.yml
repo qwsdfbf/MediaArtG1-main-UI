@@ -1,0 +1,370 @@
+name: Strict per-image visual reference collection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/final-strict-visual-collection.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TOKENIZERS_PARALLELISM: 'false'
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install image analysis dependencies
+        run: |
+          python -m pip install --quiet requests pillow imagehash torch torchvision 'transformers>=4.40,<5'
+      - name: Collect and inspect each image separately
+        run: |
+          cat > /tmp/collect.py <<'PY'
+          import csv, io, json, math, os, shutil, time, zipfile
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from pathlib import Path
+
+          import imagehash
+          import requests
+          import torch
+          from PIL import Image, ImageStat
+          from transformers import CLIPModel, CLIPProcessor
+
+          BASE = 'https://safebooru.donmai.us'
+          ROOT = Path('strict_output_work')
+          RAW = ROOT / 'raw'
+          FINAL = ROOT / 'strict_verified_images'
+          RAW.mkdir(parents=True, exist_ok=True)
+          FINAL.mkdir(parents=True, exist_ok=True)
+
+          session = requests.Session()
+          session.headers.update({'User-Agent': 'StrictVisualReferenceResearch/2.0'})
+
+          anchors = [('sitting', 14), ('kneeling', 12), ('straight-on', 18), ('looking_at_viewer', 10)]
+          cues = [
+              'bound','chains','shackles','handcuffs','rope','cage','prison','dungeon',
+              'tentacles','restrained','collar','wires','cables','mechanical_arms',
+              'torn_clothes','injury','blood','dirty','bandages','bruises','wound',
+              'rubble','ruins','debris','cocoon','spider_web','web','vines','roots',
+              'monster','youkai'
+          ]
+
+          pose = {'sitting','kneeling','sitting_on_ground','seiza','wariza','yokozuwari','indian_style','crouching'}
+          ground = {'on_floor','sitting_on_ground','floor','ground','stone_floor','dirt','rubble','debris','ruins','kneeling'}
+          front = {'straight-on','front_view','facing_viewer','looking_at_viewer'}
+          strong_front = {'straight-on','front_view','facing_viewer'}
+          capture = {
+              'bound','bound_arms','bound_ankles','chains','chain','shackles','handcuffs','rope',
+              'cage','prison','dungeon','tentacles','restrained','collar','wires','cables',
+              'spreader_bar','tied_up','mechanical_arms','mechanical_restraints','cocoon',
+              'spider_web','web','vines','roots','plant_vines','mechanical_tentacles','monster','youkai'
+          }
+          damage = {
+              'torn_clothes','torn_dress','torn_shirt','torn_skirt','injury','blood','dirty',
+              'bandages','bruises','wound','scar','torn_sleeves','torn_pants','blood_on_clothes'
+          }
+          strong_weak = {
+              'crying','tears','sad','scared','afraid','closed_eyes','half-closed_eyes','head_down',
+              'hugging_own_legs','cowering','wince','pain','defeated','exhausted','slouching',
+              'trembling','sweat','frown','injury','blood','dirty','bandages','bruises','wound',
+              'blood_on_clothes','torn_clothes'
+          }
+          dark_tags = {
+              'dark','night','dark_background','black_background','indoors','dungeon','prison',
+              'ruins','rubble','debris','greyscale','monochrome','shadow','moonlight','cave',
+              'dim_lighting','low-key_lighting'
+          }
+          seat = {
+              'chair','office_chair','throne','bed','bench','sofa','couch','stool','swivel_chair',
+              'wheelchair','sitting_on_chair','sitting_on_bed','sitting_on_bench','sitting_on_sofa',
+              'sitting_on_throne','sitting_on_vehicle','sitting_on_desk','sitting_on_table'
+          }
+          happy = {'smile','grin','happy','laughing','smug','seductive_smile','evil_smile','winking','peace_sign','cheerful'}
+          sexual = {
+              'nude','naked','nipples','breasts_out','panties','underwear_only','bikini','lingerie',
+              'sex','oral','penis','vaginal','anal','masturbation','spread_legs','cameltoe','bondage',
+              'ball_gag','cleavage','ass_focus','breast_focus','pussy','cum','tentacle_sex','sex_toy',
+              'suggestive','highleg','micro_bikini','no_bra','pantyshot','upskirt'
+          }
+          ai_tags = {'ai-generated','ai-assisted','novelai','stable_diffusion','midjourney','nai_diffusion'}
+
+          def tags_of(post):
+              return set(str(post.get('tag_string') or '').split())
+
+          def media_url(post):
+              variants = (post.get('media_asset') or {}).get('variants') or []
+              options = []
+              for v in variants:
+                  url = v.get('url')
+                  width = int(v.get('width') or 0)
+                  if url and 500 <= width <= 1200:
+                      options.append((abs(width - 850), url))
+              if options:
+                  return min(options)[1]
+              return post.get('large_file_url') or post.get('file_url') or post.get('preview_file_url')
+
+          posts = {}
+          origins = {}
+          start_cursor = 6_300_000
+          for anchor, max_pages in anchors:
+              for cue in cues:
+                  cursor = start_cursor
+                  for page_index in range(max_pages):
+                      params = {'tags': f'{anchor} {cue}', 'limit': 200, 'page': f'b{cursor}'}
+                      try:
+                          response = session.get(f'{BASE}/posts.json', params=params, timeout=40)
+                          if response.status_code == 429:
+                              time.sleep(6)
+                              response = session.get(f'{BASE}/posts.json', params=params, timeout=40)
+                          if response.status_code != 200:
+                              break
+                          batch = response.json()
+                      except Exception:
+                          break
+                      if not batch:
+                          break
+                      for post in batch:
+                          post_id = int(post.get('id') or 0)
+                          created = str(post.get('created_at') or '')[:10]
+                          if post_id and created and created < '2022-07-01':
+                              posts[post_id] = post
+                              origins.setdefault(post_id, set()).add(f'{anchor}+{cue}')
+                      next_cursor = min(int(post.get('id') or cursor) for post in batch)
+                      if next_cursor >= cursor:
+                          break
+                      cursor = next_cursor
+                      oldest = min((str(post.get('created_at') or '')[:10] for post in batch if post.get('created_at')), default='')
+                      if oldest and oldest < '2006-01-01':
+                          break
+                      time.sleep(0.18)
+                  print(anchor, cue, 'old unique', len(posts), flush=True)
+
+          metadata_candidates = []
+          for post_id, post in posts.items():
+              tags = tags_of(post)
+              if post.get('rating') != 'g':
+                  continue
+              if '1girl' not in tags or {'2girls','3girls','multiple_girls'} & tags:
+                  continue
+              if not tags & pose or tags & seat or {'standing','lying','on_back','on_stomach'} & tags:
+                  continue
+              if not tags & front:
+                  continue
+              if not tags & (capture | damage):
+                  continue
+              if not tags & strong_weak:
+                  continue
+              if tags & happy or tags & sexual or tags & ai_tags:
+                  continue
+              url = media_url(post)
+              if not url:
+                  continue
+              score = (
+                  30 * len(tags & strong_front)
+                  + 10 * len(tags & {'looking_at_viewer'})
+                  + 14 * len(tags & ground)
+                  + 16 * len(tags & capture)
+                  + 18 * len(tags & damage)
+                  + 8 * len(tags & strong_weak)
+                  + 4 * len(tags & dark_tags)
+                  + (10 if 'full_body' in tags else 0)
+                  + min(8, int(post.get('score') or 0) // 25)
+              )
+              metadata_candidates.append((score, post_id, post, tags, url))
+
+          metadata_candidates.sort(key=lambda x: (x[0], int(x[2].get('score') or 0)), reverse=True)
+          metadata_candidates = metadata_candidates[:2200]
+          print('metadata candidates', len(metadata_candidates), flush=True)
+
+          def download_one(entry):
+              score, post_id, post, tags, url = entry
+              try:
+                  r = requests.get(url, timeout=45, headers={'User-Agent':'StrictVisualReferenceResearch/2.0','Referer':BASE+'/'})
+                  r.raise_for_status()
+                  image = Image.open(io.BytesIO(r.content)).convert('RGB')
+                  if min(image.size) < 220:
+                      return None
+                  probe = image.copy()
+                  probe.thumbnail((320, 320))
+                  gray = probe.convert('L')
+                  hist = gray.histogram()
+                  pixels = max(1, sum(hist))
+                  luminance = float(ImageStat.Stat(gray).mean[0])
+                  dark_fraction = sum(hist[:96]) / pixels
+                  bright_fraction = sum(hist[215:]) / pixels
+                  tagged_dark = bool(tags & dark_tags)
+                  if not ((luminance <= 174 and dark_fraction >= 0.13 and bright_fraction <= 0.54) or (tagged_dark and luminance <= 187 and dark_fraction >= 0.085)):
+                      return None
+                  if max(image.size) > 1000:
+                      image.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
+                  path = RAW / f'id{post_id}.jpg'
+                  image.save(path, 'JPEG', quality=89, optimize=True)
+                  return {
+                      'path': str(path), 'post_id': post_id, 'post': post, 'tags': sorted(tags),
+                      'url': url, 'metadata_score': score, 'luminance': luminance,
+                      'dark_fraction': dark_fraction, 'bright_fraction': bright_fraction,
+                  }
+              except Exception:
+                  return None
+
+          downloaded = []
+          with ThreadPoolExecutor(max_workers=7) as pool:
+              futures = [pool.submit(download_one, entry) for entry in metadata_candidates]
+              for future in as_completed(futures):
+                  result = future.result()
+                  if result:
+                      downloaded.append(result)
+          downloaded.sort(key=lambda x: x['metadata_score'], reverse=True)
+          downloaded = downloaded[:900]
+          print('dark downloaded candidates', len(downloaded), flush=True)
+
+          model = CLIPModel.from_pretrained('openai/clip-vit-base-patch32')
+          processor = CLIPProcessor.from_pretrained('openai/clip-vit-base-patch32')
+          model.eval()
+          torch.set_num_threads(max(1, min(4, os.cpu_count() or 2)))
+
+          criteria = {
+              'front': (
+                  ['an anime girl viewed directly from the front, frontal composition', 'front-facing anime girl centered toward the viewer'],
+                  ['anime girl viewed from the side', 'anime girl viewed from behind', 'three-quarter side view of an anime girl']
+              ),
+              'ground': (
+                  ['anime girl sitting directly on the floor', 'anime girl kneeling directly on the ground'],
+                  ['anime girl sitting on a chair or bed', 'anime girl standing', 'anime girl lying down']
+              ),
+              'weak': (
+                  ['visibly weak exhausted injured defeated anime girl', 'frightened crying battered anime girl'],
+                  ['healthy confident energetic anime girl', 'happy cheerful anime girl', 'strong heroic fighting pose']
+              ),
+              'dark': (
+                  ['dark gloomy dimly lit anime scene', 'ominous shadowy ruined interior'],
+                  ['bright sunny cheerful anime scene', 'high-key white colorful background']
+              ),
+              'distress': (
+                  ['anime girl in torn dirty damaged clothes or visibly injured', 'anime girl physically captured by chains ropes cage machinery monster or tentacles'],
+                  ['free unharmed anime girl wearing clean intact clothes', 'ordinary peaceful anime portrait']
+              ),
+              'nonsexual': (
+                  ['nonsexual dramatic anime scene with a fully clothed girl', 'serious story scene, not fanservice'],
+                  ['sexualized fetish pinup anime girl', 'erotic fanservice anime image']
+              ),
+              'human_art': (
+                  ['coherent hand-drawn anime illustration or authentic anime screenshot', 'carefully drawn human-made anime artwork'],
+                  ['AI-generated anime image with malformed inconsistent details', 'low quality synthetic diffusion image']
+              ),
+          }
+
+          text_vectors = {}
+          with torch.inference_mode():
+              for name, (positive, negative) in criteria.items():
+                  texts = positive + negative
+                  encoded = processor(text=texts, return_tensors='pt', padding=True)
+                  vectors = model.get_text_features(**encoded)
+                  vectors = vectors / vectors.norm(dim=-1, keepdim=True)
+                  text_vectors[name] = (vectors[:len(positive)].mean(dim=0), vectors[len(positive):].mean(dim=0))
+
+          checked = []
+          for index, item in enumerate(downloaded, 1):
+              image = Image.open(item['path']).convert('RGB')
+              with torch.inference_mode():
+                  encoded = processor(images=image, return_tensors='pt')
+                  vector = model.get_image_features(**encoded)[0]
+                  vector = vector / vector.norm()
+              margins = {}
+              for name, (pos, neg) in text_vectors.items():
+                  margins[name] = float(torch.dot(vector, pos) - torch.dot(vector, neg))
+              tags = set(item['tags'])
+              strong_front_tag = bool(tags & strong_front)
+              ground_tag = bool(tags & ground)
+              weak_count = len(tags & strong_weak)
+              core_count = len(tags & (capture | damage))
+              dark_tag = bool(tags & dark_tags)
+
+              checklist = {
+                  'front': margins['front'] >= -0.025 or (strong_front_tag and margins['front'] >= -0.055),
+                  'ground': margins['ground'] >= -0.030 or (ground_tag and margins['ground'] >= -0.060),
+                  'weak': margins['weak'] >= -0.025 or (weak_count >= 2 and margins['weak'] >= -0.060),
+                  'dark': margins['dark'] >= -0.035 and item['luminance'] <= 178,
+                  'distress': margins['distress'] >= -0.030 or (core_count >= 2 and margins['distress'] >= -0.065),
+                  'nonsexual': margins['nonsexual'] >= -0.060,
+                  'human_art': margins['human_art'] >= -0.065,
+              }
+              passed = all(checklist.values())
+              visual_score = sum(margins.values()) + item['metadata_score'] / 500.0 + (178 - item['luminance']) / 250.0
+              item.update({'margins': margins, 'checklist': checklist, 'passed': passed, 'visual_score': visual_score})
+              checked.append(item)
+              if index % 25 == 0:
+                  print('individually checked', index, 'passing', sum(x['passed'] for x in checked), flush=True)
+
+          passing = [item for item in checked if item['passed']]
+          passing.sort(key=lambda x: x['visual_score'], reverse=True)
+
+          selected = []
+          seen_hashes = []
+          for item in passing:
+              image = Image.open(item['path']).convert('RGB')
+              phash = imagehash.phash(image)
+              if any(phash - other <= 7 for other in seen_hashes):
+                  continue
+              seen_hashes.append(phash)
+              selected.append(item)
+              if len(selected) >= 140:
+                  break
+
+          if len(selected) < 110:
+              raise RuntimeError(f'Only {len(selected)} images passed every per-image check; output not published.')
+
+          rows = []
+          for number, item in enumerate(selected, 1):
+              image = Image.open(item['path']).convert('RGB')
+              destination = FINAL / f'{number:03d}.jpg'
+              image.save(destination, 'JPEG', quality=90, optimize=True)
+              post = item['post']
+              row = {
+                  'file': destination.name,
+                  'post_id': item['post_id'],
+                  'created_at': str(post.get('created_at') or ''),
+                  'artist': str(post.get('tag_string_artist') or ''),
+                  'character': str(post.get('tag_string_character') or ''),
+                  'copyright': str(post.get('tag_string_copyright') or ''),
+                  'post_page': f'{BASE}/posts/{item["post_id"]}',
+                  'source': str(post.get('source') or ''),
+                  'luminance': round(item['luminance'], 2),
+                  **{f'clip_{key}': round(value, 5) for key, value in item['margins'].items()},
+                  **{f'check_{key}': value for key, value in item['checklist'].items()},
+                  'tags': ' '.join(item['tags']),
+              }
+              rows.append(row)
+
+          with open(FINAL / 'sources_and_individual_checks.csv', 'w', newline='', encoding='utf-8-sig') as handle:
+              writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
+              writer.writeheader()
+              writer.writerows(rows)
+
+          (FINAL / 'count.txt').write_text(str(len(selected)), encoding='utf-8')
+          archive = Path('temp_outputs/strict_verified_images.zip')
+          archive.parent.mkdir(exist_ok=True)
+          with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+              for path in sorted(FINAL.iterdir()):
+                  zf.write(path, arcname=path.name)
+          print('FINAL VERIFIED COUNT', len(selected), 'ZIP', archive, archive.stat().st_size, flush=True)
+          PY
+          python /tmp/collect.py
+      - name: Publish temporary ZIP to repository
+        run: |
+          git config user.name 'visual-reference-bot'
+          git config user.email 'visual-reference-bot@users.noreply.github.com'
+          git add temp_outputs/strict_verified_images.zip
+          git commit -m 'Add temporary strict verified image collection'
+          git push origin HEAD:main
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: strict-verified-images
+          path: temp_outputs/strict_verified_images.zip
+          retention-days: 1
+          compression-level: 0
