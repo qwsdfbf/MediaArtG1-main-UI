@@ -14,10 +14,10 @@ jobs:
     steps:
       - name: Collect candidate reference images
         run: |
+          python -m pip install --quiet pillow requests
           python - <<'PY'
-          import csv, io, json, os, re, time
+          import csv, io, json, time
           from pathlib import Path
-          from urllib.parse import urlencode
           import requests
           from PIL import Image, ImageStat
 
@@ -138,7 +138,6 @@ jobs:
                   if im.width < 300 or im.height < 300:
                       continue
                   im.thumbnail((1100, 1100), Image.Resampling.LANCZOS)
-                  # Keep a broad pool, but discard only extremely bright/blank images.
                   lum = ImageStat.Stat(im.resize((64,64)).convert("L")).mean[0]
                   if lum > 224:
                       continue
