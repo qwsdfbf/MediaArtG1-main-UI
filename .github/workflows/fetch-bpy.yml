@@ -1,4 +1,4 @@
-name: Deep pre-AI visual reference candidate fetch
+name: Broad pre-2023 floor-seated distressed candidate fetch
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
-      - name: Collect pre-AI candidates
+      - name: Collect candidates
         run: |
           python -m pip install --quiet requests pillow
           python - <<'PY'
@@ -22,104 +22,85 @@ jobs:
           from PIL import Image, ImageStat
 
           BASE='https://safebooru.donmai.us'
-          OUT=Path('deep_candidates'); OUT.mkdir(exist_ok=True)
+          OUT=Path('broad_floor_candidates'); OUT.mkdir(exist_ok=True)
           s=requests.Session(); s.headers.update({'User-Agent':'VisualReferenceResearch/1.0'})
-
-          core=['bound','chains','shackles','handcuffs','rope','cage','prison','dungeon','tentacles','restrained','torn_clothes','injury','blood','dirty','bandages','bruises','rubble','ruins','debris','collar','wires']
-          anchors=[('sitting',18),('kneeling',14),('straight-on',20),('looking_at_viewer',12)]
-          pose_ok={'sitting','kneeling','sitting_on_ground','seiza','wariza','yokozuwari','indian_style'}
-          front={'straight-on','front_view','facing_viewer','looking_at_viewer'}
-          capture={'bound','bound_arms','bound_ankles','chains','chain','shackles','handcuffs','rope','cage','prison','dungeon','tentacles','restrained','collar','wires','spreader_bar','tied_up','mechanical_arms','mechanical_restraints'}
-          damage={'torn_clothes','torn_dress','torn_shirt','torn_skirt','injury','blood','dirty','bandages','bruises','wound','scar','torn_sleeves'}
-          weak={'crying','tears','sad','scared','afraid','closed_eyes','half-closed_eyes','head_down','hugging_own_legs','cowering','wince','pain','defeated','exhausted','slouching','trembling','sweat','frown','expressionless'}|damage
-          dark={'dark','night','dark_background','black_background','indoors','dungeon','prison','ruins','rubble','debris','greyscale','monochrome','shadow','moonlight','dim_lighting','low-key_lighting','cave'}
+          anchors=['on_floor','sitting_on_ground','sitting','kneeling','seiza','hugging_own_legs']
+          cues=['bound','chains','shackles','handcuffs','rope','cage','prison','dungeon','tentacles','restrained','torn_clothes','injury','blood','dirty','bandages','bruises','rubble','ruins','debris','collar','wires']
+          pose_ok={'sitting','kneeling','sitting_on_ground','seiza','wariza','yokozuwari','indian_style','on_floor','hugging_own_legs'}
           seat={'chair','office_chair','throne','bed','bench','sofa','couch','stool','swivel_chair','wheelchair','sitting_on_chair','sitting_on_bed','sitting_on_bench','sitting_on_sofa','sitting_on_throne','sitting_on_vehicle','sitting_on_desk','sitting_on_table'}
-          happy={'smile','grin','happy','laughing','smug','seductive_smile','evil_smile','winking','peace_sign','cheerful'}
+          capture={'bound','bound_arms','bound_ankles','chains','chain','shackles','handcuffs','rope','cage','prison','dungeon','tentacles','restrained','collar','wires','spreader_bar','tied_up_(nonsexual)','mechanical_arms'}
+          damage={'torn_clothes','torn_dress','torn_shirt','torn_skirt','injury','blood','dirty','bandages','bruises','bruise','wound','scar','torn_sleeves','broken_arm'}
           sexual={'nude','naked','nipples','breasts_out','panties','underwear_only','bikini','lingerie','sex','oral','penis','vaginal','anal','masturbation','spread_legs','cameltoe','bondage','ball_gag','cleavage','ass_focus','breast_focus','pussy','cum','tentacle_sex','sex_toy'}
           ai={'ai-generated','ai-assisted','novelai','stable_diffusion','midjourney','nai_diffusion'}
-
           posts={}; origins={}
-          for anchor,max_pages in anchors:
-            for cue in core:
+          for anchor in anchors:
+            for cue in cues:
               cursor=None
-              for pi in range(max_pages):
+              for pi in range(10):
                 params={'tags':f'{anchor} {cue}','limit':200}
                 if cursor: params['page']=f'b{cursor}'
                 try:
-                  r=s.get(f'{BASE}/posts.json',params=params,timeout=40)
+                  r=s.get(BASE+'/posts.json',params=params,timeout=40)
                   if r.status_code==429:
-                    time.sleep(6); r=s.get(f'{BASE}/posts.json',params=params,timeout=40)
-                  if r.status_code!=200:
-                    print('query',anchor,cue,pi+1,r.status_code,flush=True); break
+                    time.sleep(4); r=s.get(BASE+'/posts.json',params=params,timeout=40)
+                  if r.status_code!=200: break
                   data=r.json()
-                except Exception as e:
-                  print('query error',anchor,cue,pi+1,repr(e),flush=True); break
+                except Exception: break
                 if not data: break
                 for p in data:
                   pid=int(p.get('id') or 0)
                   if not pid: continue
                   created=str(p.get('created_at') or '')[:10]
-                  if created and created<'2022-07-01':
-                    posts[pid]=p; origins.setdefault(pid,set()).add(f'{anchor}+{cue}')
+                  if created and created<'2023-01-01':
+                    posts[pid]=p; origins.setdefault(pid,set()).add(anchor+'+'+cue)
                 new_cursor=min(int(p.get('id') or 10**18) for p in data)
                 if cursor==new_cursor: break
                 cursor=new_cursor
-                oldest=min((str(p.get('created_at') or '')[:10] for p in data if p.get('created_at')),default='')
-                if oldest and oldest<'2007-01-01': break
-                time.sleep(.22)
-              print(anchor,cue,'unique_old',len(posts),flush=True)
+                time.sleep(.18)
+              print(anchor,cue,len(posts),flush=True)
 
-          def tags_of(p): return set(str(p.get('tag_string') or '').split())
           def media_url(p):
             variants=(p.get('media_asset') or {}).get('variants') or []
             cand=[]
             for v in variants:
               u=v.get('url'); w=int(v.get('width') or 0)
-              if u and 420<=w<=1200: cand.append((abs(w-900),u))
+              if u and 420<=w<=1200: cand.append((abs(w-850),u))
             if cand: return min(cand)[1]
             return p.get('large_file_url') or p.get('file_url') or p.get('preview_file_url')
 
-          shortlist=[]
+          ranked=[]
           for pid,p in posts.items():
-            t=tags_of(p)
+            t=set(str(p.get('tag_string') or '').split())
             if p.get('rating')!='g' or '1girl' not in t or {'2girls','3girls','multiple_girls'}&t: continue
             if not t&pose_ok or t&seat or {'standing','lying','on_back','on_stomach'}&t: continue
-            if not t&front or not t&(capture|damage) or not t&weak: continue
-            if t&happy or t&sexual or t&ai: continue
+            if not t&(capture|damage) or t&sexual or t&ai: continue
             u=media_url(p)
             if not u: continue
-            score=18*len(t&{'straight-on','front_view','facing_viewer'})+7*len(t&{'looking_at_viewer'})+10*len(t&capture)+10*len(t&damage)+4*len(t&weak)+3*len(t&dark)+(8 if 'full_body' in t else 0)+min(8,int(p.get('score') or 0)//25)
-            shortlist.append((score,pid,p,t,u))
-          shortlist.sort(reverse=True,key=lambda x:(x[0],int(x[2].get('score') or 0)))
-          print('metadata posts',len(posts),'shortlist',len(shortlist),flush=True)
-
+            score=12*len(t&capture)+12*len(t&damage)+8*len(t&{'straight-on','front_view','facing_viewer','looking_at_viewer'})+6*len(t&{'crying','tears','sad','scared','closed_eyes','head_down','hugging_own_legs','cowering','wince','pain','defeated','exhausted','slouching','sweat'})
+            ranked.append((score,pid,p,t,u))
+          ranked.sort(reverse=True,key=lambda x:x[0])
           rows=[]; saved=0
-          for score,pid,p,t,u in shortlist:
-            if saved>=1600: break
+          for score,pid,p,t,u in ranked:
+            if saved>=1200: break
             try:
               rr=s.get(u,timeout=45,headers={'Referer':BASE+'/'})
-              rr.raise_for_status()
+              if rr.status_code!=200 or len(rr.content)<4000: continue
               im=Image.open(io.BytesIO(rr.content)).convert('RGB')
-              if max(im.size)<300: continue
-              probe=im.copy(); probe.thumbnail((320,320)); g=probe.convert('L'); h=g.histogram(); n=max(1,sum(h))
-              lum=float(ImageStat.Stat(g).mean[0]); dark_fraction=sum(h[:96])/n; bright_fraction=sum(h[215:])/n
-              if not ((lum<=176 and dark_fraction>=.14 and bright_fraction<=.55) or (t&dark and lum<=190 and dark_fraction>=.09)): continue
+              probe=im.copy(); probe.thumbnail((320,320)); g=probe.convert('L'); h=g.histogram(); n=max(1,sum(h)); lum=float(ImageStat.Stat(g).mean[0]); dark_fraction=sum(h[:96])/n
+              if lum>185 or dark_fraction<0.08: continue
               if max(im.size)>1200: im.thumbnail((1200,1200),Image.Resampling.LANCZOS)
-              name=f'{saved+1:04d}_id{pid}.jpg'; im.save(OUT/name,'JPEG',quality=91,optimize=True)
-              rows.append({'file':name,'id':pid,'score':score,'luminance':round(lum,2),'dark_fraction':round(dark_fraction,4),'created_at':p.get('created_at',''),'artist':p.get('tag_string_artist',''),'character':p.get('tag_string_character',''),'copyright':p.get('tag_string_copyright',''),'source':p.get('source',''),'post_page':f'{BASE}/posts/{pid}','image_url':u,'query_origins':' '.join(sorted(origins.get(pid,set()))),'tags':p.get('tag_string','')})
-              saved+=1
+              saved+=1; name=f'{saved:04d}_id{pid}.jpg'; im.save(OUT/name,'JPEG',quality=91,optimize=True)
+              rows.append({'file':name,'id':pid,'score':score,'luminance':round(lum,2),'dark_fraction':round(dark_fraction,4),'created_at':p.get('created_at',''),'artist':p.get('tag_string_artist',''),'source':p.get('source',''),'post_page':BASE+'/posts/'+str(pid),'origins':' '.join(sorted(origins.get(pid,set()))),'tags':p.get('tag_string','')})
               if saved%50==0: print('saved',saved,flush=True)
-            except Exception as e:
-              print('image error',pid,repr(e),flush=True)
+            except Exception: pass
           with open(OUT/'metadata.csv','w',newline='',encoding='utf-8-sig') as f:
             w=csv.DictWriter(f,fieldnames=rows[0].keys() if rows else ['file']); w.writeheader(); w.writerows(rows)
-          (OUT/'summary.json').write_text(json.dumps({'metadata_posts':len(posts),'shortlist':len(shortlist),'saved':saved},indent=2),encoding='utf-8')
+          (OUT/'summary.json').write_text(json.dumps({'posts':len(posts),'ranked':len(ranked),'saved':saved},indent=2),encoding='utf-8')
           print('FINAL SAVED',saved,flush=True)
           PY
-      - name: Upload candidates
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: deep-pre-ai-visual-candidates
-          path: deep_candidates
+          name: broad-pre2023-floor-candidates
+          path: broad_floor_candidates
           retention-days: 1
           compression-level: 1
