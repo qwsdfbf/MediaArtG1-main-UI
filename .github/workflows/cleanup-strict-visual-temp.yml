@@ -1,0 +1,34 @@
+name: Cleanup temporary visual collection files
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cleanup-strict-visual-temp.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore prior workflow and remove temporary outputs
+        run: |
+          first=$(git log --reverse --format='%H%x09%s' -- .github/workflows/fetch-bpy.yml | awk -F '\t' '$2=="Temporarily collect visual reference candidates" {print $1; exit}')
+          if [ -n "$first" ]; then
+            git checkout "${first}^" -- .github/workflows/fetch-bpy.yml
+          fi
+          rm -f .github/workflows/final-strict-visual-collection.yml
+          rm -f .github/workflows/cleanup-strict-visual-temp.yml
+          rm -rf temp_outputs
+          git config user.name 'visual-reference-cleanup-bot'
+          git config user.email 'visual-reference-cleanup-bot@users.noreply.github.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'Restore workflow after temporary visual reference collection'
+            git push origin HEAD:main
+          fi
