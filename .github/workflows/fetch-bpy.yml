@@ -1,4 +1,4 @@
-name: Broad weak-captive seated pre-2023 fetch
+name: Zerochan pre-AI distressed captive candidate fetch
 
 on:
   push:
@@ -12,84 +12,100 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 55
     steps:
-      - name: Collect candidates
+      - name: Collect Zerochan candidates
         run: |
-          python -m pip install --quiet requests pillow
+          python -m pip install --quiet requests pillow beautifulsoup4
           python - <<'PY'
-          import csv, io, json, time
+          import csv, io, re, time, html, json
           from pathlib import Path
+          from urllib.parse import quote
           import requests
+          from bs4 import BeautifulSoup
           from PIL import Image, ImageStat
-          BASE='https://safebooru.donmai.us'; OUT=Path('broad_weak_candidates'); OUT.mkdir(exist_ok=True)
-          s=requests.Session(); s.headers.update({'User-Agent':'VisualReferenceResearch/1.0'})
-          weak=['crying','tears','sad','scared','head_down','hugging_own_legs','cowering','pain','injury','blood','dirty','bandages','bruises','exhausted','slouching','closed_eyes','wound','scar']
-          state=['bound','shackles','handcuffs','chains','rope','cage','prison','dungeon','tentacles','restrained','collar','wires','torn_clothes','torn_dress','torn_shirt','injury','blood','bandages','dirty','rubble','ruins','debris']
-          pose={'sitting','kneeling','sitting_on_ground','seiza','wariza','yokozuwari','on_floor','hugging_own_legs','indian_style'}
-          seat={'chair','office_chair','throne','bed','bench','sofa','couch','stool','wheelchair','sitting_on_chair','sitting_on_bed','sitting_on_bench','sitting_on_sofa','sitting_on_throne','sitting_on_vehicle','sitting_on_desk','sitting_on_table'}
-          capture={'bound','bound_arms','bound_ankles','chains','chain','shackles','handcuffs','rope','cage','prison','dungeon','tentacles','restrained','collar','wires','spreader_bar','tied_up_(nonsexual)','mechanical_arms'}
-          damage={'torn_clothes','torn_dress','torn_shirt','torn_skirt','torn_sleeves','injury','blood','dirty','bandages','bruises','bruise','wound','scar'}
-          weakset=set(weak)|{'tears','sad','scared','cowering','pain','exhausted','slouching'}
-          front={'looking_at_viewer','straight-on','facing_viewer','front_view'}
-          sexual={'nude','naked','nipples','breasts_out','panties','underwear_only','bikini','lingerie','sex','oral','penis','vaginal','anal','masturbation','spread_legs','cameltoe','bondage','ball_gag','cleavage','ass_focus','breast_focus','pussy','cum','tentacle_sex','sex_toy'}
-          ai={'ai-generated','ai-assisted','novelai','stable_diffusion','midjourney','nai_diffusion'}
-          posts={}; origins={}
-          for w in weak:
-            for st in state:
-              if w==st: continue
-              cursor=None
-              for pi in range(20):
-                params={'tags':f'{w} {st}','limit':200}
-                if cursor: params['page']=f'b{cursor}'
-                try:
-                  r=s.get(BASE+'/posts.json',params=params,timeout=40)
-                  if r.status_code==429: time.sleep(3); r=s.get(BASE+'/posts.json',params=params,timeout=40)
-                  if r.status_code!=200: break
-                  data=r.json()
-                except Exception: break
-                if not data: break
-                for p in data:
-                  pid=int(p.get('id') or 0); created=str(p.get('created_at') or '')[:10]
-                  if pid and created and created<'2023-01-01': posts[pid]=p; origins.setdefault(pid,set()).add(w+'+'+st)
-                nc=min(int(p.get('id') or 10**18) for p in data)
-                if cursor==nc: break
-                cursor=nc; time.sleep(.05)
-          def media_url(p):
-            variants=(p.get('media_asset') or {}).get('variants') or []; cand=[]
-            for v in variants:
-              u=v.get('url'); w=int(v.get('width') or 0)
-              if u and 420<=w<=1200: cand.append((abs(w-800),u))
-            return min(cand)[1] if cand else (p.get('large_file_url') or p.get('file_url') or p.get('preview_file_url'))
-          ranked=[]
-          for pid,p in posts.items():
-            t=set(str(p.get('tag_string') or '').split())
-            if p.get('rating')!='g' or '1girl' not in t or {'2girls','3girls','multiple_girls'}&t: continue
-            if not t&pose or t&seat or {'standing','lying','on_back','on_stomach'}&t: continue
-            if not t&weakset or not t&(capture|damage): continue
-            if t&sexual or t&ai: continue
-            u=media_url(p)
-            if not u: continue
-            score=22*len(t&weakset)+18*len(t&capture)+16*len(t&damage)+12*len(t&front)
-            ranked.append((score,pid,p,t,u))
-          ranked.sort(reverse=True,key=lambda x:x[0]); rows=[]; saved=0
-          for score,pid,p,t,u in ranked:
-            if saved>=1800: break
+
+          BASE='https://www.zerochan.net'
+          OUT=Path('zerochan_candidates'); OUT.mkdir(exist_ok=True)
+          s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0 VisualReferenceResearch/1.0'})
+
+          combos=[
+            ('Crying','Cage'),('Crying','Chain'),('Crying','Handcuffs'),('Crying','Prison'),
+            ('Crying','Blood'),('Crying','Bandages'),('Crying','Injured'),('Crying','Torn Clothes'),
+            ('Sad','Cage'),('Sad','Chain'),('Sad','Handcuffs'),('Sad','Prison'),('Sad','Blood'),
+            ('Scared','Cage'),('Scared','Chain'),('Scared','Handcuffs'),('Scared','Prison'),
+            ('Bandages','Cage'),('Bandages','Chain'),('Bandages','Prison'),('Blood','Cage'),
+            ('Blood','Chain'),('Blood','Prison'),('Sitting','Cage'),('Sitting','Chain'),
+            ('Sitting','Handcuffs'),('Sitting','Prison'),('Kneeling','Cage'),('Kneeling','Chain'),
+            ('Kneeling','Handcuffs'),('Kneeling','Prison'),('Crying','Dark'),('Crying','Ruins'),
+            ('Crying','Rubble'),('Sad','Ruins'),('Bandages','Ruins'),('Blood','Ruins'),
+            ('Crying','Tentacles'),('Sad','Tentacles'),('Scared','Tentacles')]
+          ids=set(); origins={}
+          for a,b in combos:
+            tag=quote(a+','+b, safe=',')
+            for p in range(1,31):
+              url=f'{BASE}/{tag}?p={p}'
+              try:
+                r=s.get(url,timeout=35)
+                if r.status_code!=200: break
+                found=set(map(int,re.findall(r'href=[\"\']/([0-9]{5,8})(?:[\"\'/#?])',r.text)))
+                # keep conservative pre-generative-AI era by Zerochan id
+                found={i for i in found if i<3700000}
+                if not found: break
+                before=len(ids)
+                ids.update(found)
+                for i in found: origins.setdefault(i,set()).add(a+'+'+b)
+                if p>=3 and len(ids)==before: break
+                time.sleep(.12)
+              except Exception:
+                break
+            print(a,b,len(ids),flush=True)
+
+          def page_info(i):
             try:
-              rr=s.get(u,timeout=45,headers={'Referer':BASE+'/'}); 
-              if rr.status_code!=200 or len(rr.content)<4000: continue
-              im=Image.open(io.BytesIO(rr.content)).convert('RGB'); probe=im.copy(); probe.thumbnail((320,320)); g=probe.convert('L'); h=g.histogram(); n=max(1,sum(h)); lum=float(ImageStat.Stat(g).mean[0]); dark_fraction=sum(h[:96])/n
-              if lum>180 or dark_fraction<0.08: continue
+              r=s.get(f'{BASE}/{i}',timeout=35)
+              if r.status_code!=200: return None
+              soup=BeautifulSoup(r.text,'html.parser')
+              # Reject pages explicitly marked as AI if present.
+              txt=soup.get_text(' ',strip=True).lower()
+              if any(x in txt for x in ['ai generated','ai-generated','stable diffusion','novelai','midjourney']): return None
+              og=soup.find('meta',attrs={'property':'og:image'})
+              image=og.get('content') if og else None
+              if not image:
+                m=re.search(r'https://static\.zerochan\.net/[^\"\'<> ]+\.(?:jpg|jpeg|png|webp)',r.text,re.I)
+                image=html.unescape(m.group(0)) if m else None
+              title=(soup.find('title').get_text(' ',strip=True) if soup.find('title') else '')
+              return image,title
+            except Exception:
+              return None
+
+          rows=[]; saved=0
+          for i in sorted(ids, reverse=True):
+            if saved>=1200: break
+            info=page_info(i)
+            if not info: continue
+            u,title=info
+            try:
+              rr=s.get(u,timeout=45,headers={'Referer':BASE+'/'})
+              if rr.status_code!=200 or len(rr.content)<5000: continue
+              im=Image.open(io.BytesIO(rr.content)).convert('RGB')
+              if min(im.size)<250: continue
+              probe=im.copy(); probe.thumbnail((320,320)); g=probe.convert('L'); h=g.histogram(); n=max(1,sum(h)); lum=float(ImageStat.Stat(g).mean[0]); dark_fraction=sum(h[:96])/n
+              if lum>190 or dark_fraction<0.06: continue
               if max(im.size)>1200: im.thumbnail((1200,1200),Image.Resampling.LANCZOS)
-              saved+=1; name=f'{saved:04d}_id{pid}.jpg'; im.save(OUT/name,'JPEG',quality=91,optimize=True)
-              rows.append({'file':name,'id':pid,'score':score,'luminance':round(lum,2),'dark_fraction':round(dark_fraction,4),'front_tags':' '.join(sorted(t&front)),'created_at':p.get('created_at',''),'artist':p.get('tag_string_artist',''),'source':p.get('source',''),'post_page':BASE+'/posts/'+str(pid),'origins':' '.join(sorted(origins.get(pid,set()))),'tags':p.get('tag_string','')})
-            except Exception: pass
+              saved+=1; fn=f'{saved:04d}_zc{i}.jpg'; im.save(OUT/fn,'JPEG',quality=91,optimize=True)
+              rows.append({'file':fn,'zerochan_id':i,'luminance':round(lum,2),'dark_fraction':round(dark_fraction,4),'page':f'{BASE}/{i}','image_url':u,'title':title,'origins':' '.join(sorted(origins.get(i,set())))})
+              if saved%50==0: print('saved',saved,flush=True)
+              time.sleep(.08)
+            except Exception:
+              pass
           with open(OUT/'metadata.csv','w',newline='',encoding='utf-8-sig') as f:
-            w=csv.DictWriter(f,fieldnames=rows[0].keys() if rows else ['file']); w.writeheader(); w.writerows(rows)
-          (OUT/'summary.json').write_text(json.dumps({'posts':len(posts),'ranked':len(ranked),'saved':saved},indent=2),encoding='utf-8')
-          print('FINAL SAVED',saved,flush=True)
+            fields=['file','zerochan_id','luminance','dark_fraction','page','image_url','title','origins']
+            w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
+          (OUT/'summary.json').write_text(json.dumps({'ids':len(ids),'saved':saved},indent=2),encoding='utf-8')
+          print('FINAL',len(ids),saved,flush=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: broad-weak-captive-seated-pre2023
-          path: broad_weak_candidates
+          name: zerochan-preai-distressed-captive-candidates
+          path: zerochan_candidates
           retention-days: 1
           compression-level: 1
