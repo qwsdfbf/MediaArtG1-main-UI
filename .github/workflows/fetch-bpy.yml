@@ -22,147 +22,93 @@ jobs:
           from PIL import Image, ImageStat
 
           BASE = "https://safebooru.donmai.us"
-          OUT = Path("candidates")
-          OUT.mkdir(exist_ok=True)
-          session = requests.Session()
-          session.headers.update({"User-Agent": "VisualReferenceResearch/1.0 (noncommercial reference collection)"})
+          OUT = Path("candidates"); OUT.mkdir(exist_ok=True)
+          s = requests.Session()
+          s.headers.update({"User-Agent": "VisualReferenceResearch/1.0 (noncommercial reference collection)"})
 
-          pairs = [
-              ("sitting", "bound"), ("kneeling", "bound"),
-              ("sitting", "chains"), ("kneeling", "chains"),
-              ("sitting", "shackles"), ("kneeling", "shackles"),
-              ("sitting", "handcuffs"), ("kneeling", "handcuffs"),
-              ("sitting", "rope"), ("kneeling", "rope"),
-              ("sitting", "cage"), ("kneeling", "cage"),
-              ("sitting", "prison"), ("kneeling", "prison"),
-              ("sitting", "dungeon"), ("kneeling", "dungeon"),
-              ("sitting", "tentacles"), ("kneeling", "tentacles"),
-              ("sitting", "torn_clothes"), ("kneeling", "torn_clothes"),
-              ("sitting", "injury"), ("kneeling", "injury"),
-              ("sitting", "blood"), ("kneeling", "blood"),
-              ("sitting", "crying"), ("kneeling", "crying"),
-              ("sitting", "tears"), ("kneeling", "tears"),
-              ("sitting", "dirty"), ("kneeling", "dirty"),
-              ("sitting", "bandages"), ("kneeling", "bandages"),
-              ("sitting", "ruins"), ("kneeling", "ruins"),
-              ("sitting", "rubble"), ("kneeling", "rubble"),
-              ("sitting", "debris"), ("kneeling", "debris"),
-              ("sitting", "dark"), ("kneeling", "dark"),
-              ("sitting", "sad"), ("kneeling", "sad"),
-              ("sitting", "scared"), ("kneeling", "scared"),
-              ("sitting", "closed_eyes"), ("kneeling", "closed_eyes"),
-              ("sitting", "hugging_own_legs"), ("kneeling", "head_down"),
-              ("sitting_on_ground", "1girl"), ("seiza", "1girl")
+          cues = [
+              "bound", "chains", "shackles", "handcuffs", "rope", "cage", "prison", "dungeon",
+              "tentacles", "restrained", "collar", "gag", "torn_clothes", "torn_dress", "injury",
+              "blood", "crying", "tears", "dirty", "bandages", "bruises", "sad", "scared",
+              "closed_eyes", "head_down", "hugging_own_legs", "rubble", "ruins", "debris",
+              "cowering", "wince", "slouching", "dark", "dark_background", "night", "indoors"
           ]
-
-          reject_tags = {
-              "ai-generated", "ai-assisted", "novelai", "stable_diffusion",
-              "nude", "naked", "nipples", "areolae", "sex", "cum", "masturbation",
-              "panties", "underwear_only", "bikini", "lingerie", "spread_legs",
-              "pov_crotch", "ass_focus", "breast_focus", "bondage_outfit"
+          reject = {
+              "ai-generated", "ai-assisted", "novelai", "stable_diffusion", "nude", "naked",
+              "nipples", "areolae", "sex", "cum", "masturbation", "panties", "underwear_only",
+              "bikini", "lingerie", "spread_legs", "pov_crotch", "ass_focus", "breast_focus",
+              "bondage_outfit", "1boy", "multiple_girls"
           }
           seat_reject = {
               "sitting_on_chair", "sitting_on_bed", "sitting_on_bench", "sitting_on_sofa",
               "sitting_on_stool", "sitting_on_throne", "sitting_on_lap", "sitting_on_person",
-              "sitting_on_desk", "sitting_on_table", "sitting_on_vehicle", "sitting_on_rock"
+              "sitting_on_desk", "sitting_on_table", "sitting_on_vehicle"
           }
-          distress = {
-              "bound", "chains", "shackles", "handcuffs", "rope", "cage", "prison", "dungeon",
-              "tentacles", "torn_clothes", "torn_dress", "injury", "blood", "crying", "tears",
-              "dirty", "bandages", "bruises", "sad", "scared", "closed_eyes", "head_down",
-              "hugging_own_legs", "rubble", "ruins", "debris", "restrained", "collar", "gag",
-              "cowering", "pain", "wince", "defeated", "exhausted", "slouching"
-          }
-          darkish = {
-              "dark", "night", "dark_background", "black_background", "indoors", "dungeon",
-              "prison", "ruins", "rubble", "debris", "greyscale", "monochrome", "low-key_lighting"
-          }
+          distress = set(cues) | {"pain", "defeated", "exhausted", "torn_shirt", "torn_skirt"}
+          darkish = {"dark", "night", "dark_background", "black_background", "indoors", "dungeon",
+                     "prison", "ruins", "rubble", "debris", "greyscale", "monochrome"}
           frontish = {"looking_at_viewer", "straight-on", "front_view", "facing_viewer"}
+          pose_ok = {"sitting", "kneeling", "sitting_on_ground", "seiza"}
 
           posts = {}
-          for idx, (pose, cue) in enumerate(pairs, 1):
-              tags = f"{pose} {cue} date:<2023-01-01 order:score"
-              try:
-                  r = session.get(f"{BASE}/posts.json", params={"tags": tags, "limit": 200}, timeout=40)
-                  print(idx, tags, r.status_code, flush=True)
-                  if r.status_code != 200:
-                      time.sleep(1.5)
-                      continue
-                  data = r.json()
-              except Exception as e:
-                  print("query error", tags, repr(e), flush=True)
-                  time.sleep(2)
-                  continue
-              for p in data:
-                  alltags = set(str(p.get("tag_string", "")).split())
-                  if "1girl" not in alltags or "solo" not in alltags:
-                      continue
-                  if alltags & reject_tags or alltags & seat_reject:
-                      continue
-                  if not ({"sitting", "kneeling", "sitting_on_ground", "seiza"} & alltags):
-                      continue
-                  if not (alltags & distress):
-                      continue
-                  if p.get("rating") not in ("g", None, ""):
-                      continue
-                  created = str(p.get("created_at", ""))
-                  if created and created[:10] >= "2023-01-01":
-                      continue
-                  url = p.get("large_file_url") or p.get("file_url") or p.get("preview_file_url")
-                  if not url:
-                      continue
-                  score = int(p.get("score") or 0)
-                  score += 18 * len(alltags & distress)
-                  score += 10 * len(alltags & darkish)
-                  score += 14 * len(alltags & frontish)
-                  if "full_body" in alltags: score += 8
-                  if "solo" in alltags: score += 3
-                  old = posts.get(p["id"])
-                  if old is None or score > old[0]:
-                      posts[p["id"]] = (score, p, pose, cue)
-              time.sleep(0.8)
+          qn = 0
+          for cue in cues:
+              for page in (1, 2):
+                  qn += 1
+                  tags = f"{cue} date:<2023-01-01"
+                  try:
+                      r = s.get(f"{BASE}/posts.json", params={"tags": tags, "limit": 200, "page": page}, timeout=40)
+                      print(qn, tags, "page", page, r.status_code, flush=True)
+                      if r.status_code != 200: time.sleep(1); continue
+                      data = r.json()
+                  except Exception as e:
+                      print("query error", cue, page, type(e).__name__, flush=True); time.sleep(1); continue
+                  for p in data:
+                      t = set(str(p.get("tag_string", "")).split())
+                      if "1girl" not in t or "solo" not in t or not (t & pose_ok): continue
+                      if t & reject or t & seat_reject or not (t & distress): continue
+                      if p.get("rating") not in ("g", None, ""): continue
+                      created = str(p.get("created_at", ""))
+                      if created and created[:10] >= "2023-01-01": continue
+                      url = p.get("large_file_url") or p.get("file_url") or p.get("preview_file_url")
+                      if not url: continue
+                      score = int(p.get("score") or 0) + 18*len(t&distress) + 12*len(t&darkish) + 16*len(t&frontish)
+                      if "full_body" in t: score += 10
+                      old = posts.get(p["id"])
+                      if old is None or score > old[0]: posts[p["id"]] = (score, p, cue)
+                  time.sleep(.55)
 
-          ranked = sorted(posts.values(), key=lambda x: x[0], reverse=True)
-          print("unique metadata candidates", len(ranked), flush=True)
-          rows = []
-          saved = 0
-          for score, p, pose, cue in ranked:
-              if saved >= 900:
-                  break
+          ranked = sorted(posts.values(), key=lambda x:x[0], reverse=True)
+          print("metadata candidates", len(ranked), flush=True)
+          rows=[]; saved=0
+          for score,p,cue in ranked:
+              if saved >= 900: break
               url = p.get("large_file_url") or p.get("file_url") or p.get("preview_file_url")
               try:
-                  rr = session.get(url, timeout=45, headers={"Referer": BASE + "/"})
-                  if rr.status_code != 200 or len(rr.content) < 5000:
-                      continue
-                  im = Image.open(io.BytesIO(rr.content)).convert("RGB")
-                  if im.width < 300 or im.height < 300:
-                      continue
-                  im.thumbnail((1100, 1100), Image.Resampling.LANCZOS)
-                  lum = ImageStat.Stat(im.resize((64,64)).convert("L")).mean[0]
-                  if lum > 224:
-                      continue
-                  saved += 1
-                  fn = f"{saved:04d}_id{p['id']}.jpg"
-                  im.save(OUT / fn, "JPEG", quality=90, optimize=True)
-                  rows.append({
-                      "file": fn, "id": p["id"], "score": score, "luminance": round(lum,1),
-                      "created_at": p.get("created_at", ""), "rating": p.get("rating", ""),
-                      "page": f"{BASE}/posts/{p['id']}", "source": p.get("source", ""),
-                      "artist": p.get("tag_string_artist", ""), "query_pose": pose, "query_cue": cue,
-                      "tags": p.get("tag_string", "")
-                  })
-                  if saved % 25 == 0:
-                      print("saved", saved, flush=True)
-              except Exception as e:
-                  print("download error", p.get("id"), type(e).__name__, flush=True)
+                  rr=s.get(url, timeout=45, headers={"Referer":BASE+"/"})
+                  if rr.status_code != 200 or len(rr.content)<5000: continue
+                  im=Image.open(io.BytesIO(rr.content)).convert("RGB")
+                  if im.width<300 or im.height<300: continue
+                  im.thumbnail((1100,1100), Image.Resampling.LANCZOS)
+                  lum=ImageStat.Stat(im.resize((64,64)).convert("L")).mean[0]
+                  if lum>224: continue
+                  saved+=1; fn=f"{saved:04d}_id{p['id']}.jpg"
+                  im.save(OUT/fn,"JPEG",quality=90,optimize=True)
+                  tags=str(p.get("tag_string","")); ts=set(tags.split())
+                  pose=",".join(sorted(ts&pose_ok))
+                  rows.append({"file":fn,"id":p["id"],"score":score,"luminance":round(lum,1),
+                    "created_at":p.get("created_at",""),"page":f"{BASE}/posts/{p['id']}",
+                    "source":p.get("source",""),"artist":p.get("tag_string_artist",""),
+                    "pose":pose,"query_cue":cue,"tags":tags})
+                  if saved%25==0: print("saved",saved,flush=True)
+              except Exception as e: print("download error",p.get("id"),type(e).__name__,flush=True)
 
-          with open(OUT / "metadata.csv", "w", encoding="utf-8-sig", newline="") as f:
-              fields = ["file","id","score","luminance","created_at","rating","page","source","artist","query_pose","query_cue","tags"]
-              w = csv.DictWriter(f, fieldnames=fields)
-              w.writeheader(); w.writerows(rows)
-          with open(OUT / "summary.json", "w", encoding="utf-8") as f:
-              json.dump({"saved": saved, "metadata_candidates": len(ranked)}, f, ensure_ascii=False, indent=2)
-          print("FINAL SAVED", saved, flush=True)
+          fields=["file","id","score","luminance","created_at","page","source","artist","pose","query_cue","tags"]
+          with open(OUT/"metadata.csv","w",encoding="utf-8-sig",newline="") as f:
+              w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(rows)
+          with open(OUT/"summary.json","w",encoding="utf-8") as f:
+              json.dump({"saved":saved,"metadata_candidates":len(ranked)},f,indent=2)
+          print("FINAL SAVED",saved,flush=True)
           PY
       - uses: actions/upload-artifact@v4
         with:
